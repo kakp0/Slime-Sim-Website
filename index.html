@@ -437,23 +437,38 @@
             window.addEventListener('mouseup', onInteractionEnd, false);
             window.addEventListener('mousemove', (e) => onInteractionMove(e.clientX, e.clientY), false);
 
-            // Touch events
+            // --- Touch events ---
+            // The following handlers are designed to allow interaction with the cube
+            // without interfering with the UI controls (sliders).
+
             window.addEventListener('touchstart', (e) => {
+                // If the touch starts on the UI controls, do nothing.
+                // This allows the browser to handle slider interaction normally.
+                if (e.target.closest('#controls')) {
+                    return;
+                }
+
+                // If the touch is on the canvas, prevent default browser actions
+                // (like scrolling or zooming) and begin interaction with the cube.
+                e.preventDefault();
                 if (e.touches.length > 0) {
-                    e.preventDefault();
                     onInteractionStart(e.touches[0].clientX, e.touches[0].clientY, e.target);
                 }
             }, { passive: false });
 
             window.addEventListener('touchend', (e) => {
-                e.preventDefault();
+                // Simply end any ongoing interaction. No need to prevent default here.
                 onInteractionEnd();
             }, { passive: false });
             
             window.addEventListener('touchmove', (e) => {
-                if (e.touches.length > 0) {
+                // Only prevent default and process the move if we are actively dragging the cube.
+                // This stops the listener from hijacking scrolling if a touch starts on the controls.
+                if (mouse_dragging) {
                     e.preventDefault();
-                    onInteractionMove(e.touches[0].clientX, e.touches[0].clientY);
+                    if (e.touches.length > 0) {
+                        onInteractionMove(e.touches[0].clientX, e.touches[0].clientY);
+                    }
                 }
             }, { passive: false });
         }
