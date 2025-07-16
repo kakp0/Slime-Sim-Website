@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Deformable Slime Cube (JS/Three.js)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Deformable Slime Cube (Mobile Friendly)</title>
     <style>
         /* Basic styling for the page */
         body {
@@ -12,6 +12,8 @@
             background-color: #1a1a1a;
             color: #e0e0e0;
             font-family: 'Courier New', Courier, monospace;
+            /* Prevent pull-to-refresh and other touch gestures on the page body */
+            overscroll-behavior: none;
         }
         /* Make the canvas fill the entire screen */
         canvas {
@@ -20,7 +22,8 @@
         /* UI Controls Container */
         #controls {
             position: absolute;
-            top: 10px;
+            top: 0;
+            left: 0;
             width: 100%;
             text-align: center;
             z-index: 100;
@@ -28,9 +31,9 @@
             flex-direction: column;
             align-items: center;
             gap: 10px;
-            background-color: rgba(0,0,0,0.25);
+            background-color: rgba(0,0,0,0.35);
             padding: 15px;
-            border-radius: 0 0 15px 15px;
+            box-sizing: border-box;
         }
         /* Slider Controls Styling */
         .sliderControl {
@@ -57,22 +60,70 @@
         input[type="range"]::-webkit-slider-thumb {
             -webkit-appearance: none;
             appearance: none;
-            width: 20px;
-            height: 20px;
+            width: 24px; /* Larger for touch */
+            height: 24px; /* Larger for touch */
             background: #00ff88;
             cursor: pointer;
             border-radius: 50%;
         }
         input[type="range"]::-moz-range-thumb {
-            width: 20px;
-            height: 20px;
+            width: 24px; /* Larger for touch */
+            height: 24px; /* Larger for touch */
             background: #00ff88;
             cursor: pointer;
             border-radius: 50%;
         }
+
+        /* --- Mobile Specific Styles --- */
+
+        /* Overlay to prompt user to rotate device back to portrait mode */
+        #rotate-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            display: none; /* Hidden by default */
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            font-size: 1.2em;
+            z-index: 200;
+        }
+
+        /* Media query for mobile devices in landscape orientation */
+        @media (max-width: 900px) and (orientation: landscape) {
+            #rotate-overlay {
+                display: flex; /* Show the overlay */
+            }
+            #controls, canvas {
+                display: none; /* Hide the main content */
+            }
+        }
+        
+        /* Adjust controls for smaller screens */
+        @media (max-width: 480px) {
+            .sliderControl {
+                width: 95%;
+                flex-direction: column;
+                gap: 5px;
+                align-items: stretch;
+            }
+            input[type="range"] {
+                width: 100%;
+            }
+        }
+
     </style>
 </head>
 <body>
+    <!-- This div is shown on mobile when in landscape mode -->
+    <div id="rotate-overlay">
+        <p>Please rotate your device to portrait mode.</p>
+    </div>
+
     <div id="controls">
         <div class="sliderControl">
             <label for="rigiditySlider">Rigidity:</label>
@@ -102,6 +153,7 @@
         //
         // This program simulates a deformable cube using a hybrid mass-spring system.
         // It uses weak spring forces for jiggle and a constraint solver for stability.
+        // Now with mobile touch controls and orientation lock.
 
         // --- Global Three.js Components ---
         let scene, camera, renderer;
@@ -185,19 +237,17 @@
                 }
 
                 const stiffness = 100.0;
-                const damping = 5.0; // Added damping parameter
+                const damping = 5.0;
                 const addSpring = (p1_idx, p2_idx) => this.springs.push(new Spring(this.particles[p1_idx], this.particles[p2_idx], stiffness, damping));
                 
                 for (let i = 0; i < resolution; i++) {
                     for (let j = 0; j < resolution; j++) {
                         for (let k = 0; k < resolution; k++) {
                             const p_idx = i * resolution * resolution + j * resolution + k;
-                            // Structural springs
                             if (i < resolution - 1) addSpring(p_idx, (i + 1) * resolution * resolution + j * resolution + k);
                             if (j < resolution - 1) addSpring(p_idx, i * resolution * resolution + (j + 1) * resolution + k);
                             if (k < resolution - 1) addSpring(p_idx, i * resolution * resolution + j * resolution + (k + 1));
                             
-                            // BUG FIX: Re-added shear springs for structural integrity
                             if (i < resolution - 1 && j < resolution - 1) addSpring(p_idx, (i + 1) * resolution * resolution + (j + 1) * resolution + k);
                             if (i > 0 && j < resolution - 1) addSpring(p_idx, (i - 1) * resolution * resolution + (j + 1) * resolution + k);
                             if (i < resolution - 1 && k < resolution - 1) addSpring(p_idx, (i + 1) * resolution * resolution + j * resolution + (k + 1));
@@ -205,7 +255,6 @@
                             if (j < resolution - 1 && k < resolution - 1) addSpring(p_idx, i * resolution * resolution + (j + 1) * resolution + (k + 1));
                             if (j > 0 && k < resolution - 1) addSpring(p_idx, i * resolution * resolution + (j - 1) * resolution + (k + 1));
 
-                            // Bend springs
                             if (i < resolution - 2) addSpring(p_idx, (i + 2) * resolution * resolution + j * resolution + k);
                             if (j < resolution - 2) addSpring(p_idx, i * resolution * resolution + (j + 2) * resolution + k);
                             if (k < resolution - 2) addSpring(p_idx, i * resolution * resolution + j * resolution + (k + 2));
@@ -337,10 +386,10 @@
         let drag_plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
         let drag_offset = new THREE.Vector3();
 
-        function onMouseDown(event) {
-            if (event.target.closest('#controls')) return;
-            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        function onInteractionStart(clientX, clientY, target) {
+            if (target.closest('#controls')) return;
+            mouse.x = (clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(clientY / window.innerHeight) * 2 + 1;
             raycaster.setFromCamera(mouse, camera);
             let min_dist_sq = Infinity;
             let closest_particle = null;
@@ -361,7 +410,7 @@
                 dragged_particle.is_fixed = true;
             }
         }
-        function onMouseUp(event) {
+        function onInteractionEnd() {
             if (mouse_dragging && dragged_particle) {
                 dragged_particle.is_fixed = false;
                 dragged_particle.old_position.copy(dragged_particle.position);
@@ -369,16 +418,44 @@
             }
             mouse_dragging = false;
         }
-        function onMouseMove(event) {
+        function onInteractionMove(clientX, clientY) {
             if (mouse_dragging && dragged_particle) {
-                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-                mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+                mouse.x = (clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(clientY / window.innerHeight) * 2 + 1;
                 raycaster.setFromCamera(mouse, camera);
                 const intersection = new THREE.Vector3();
                 if (raycaster.ray.intersectPlane(drag_plane, intersection)) {
                     dragged_particle.position.copy(intersection.sub(drag_offset));
                 }
             }
+        }
+
+        // --- Event Listeners (Mouse and Touch) ---
+        function addEventListeners() {
+            // Mouse events
+            window.addEventListener('mousedown', (e) => onInteractionStart(e.clientX, e.clientY, e.target), false);
+            window.addEventListener('mouseup', onInteractionEnd, false);
+            window.addEventListener('mousemove', (e) => onInteractionMove(e.clientX, e.clientY), false);
+
+            // Touch events
+            window.addEventListener('touchstart', (e) => {
+                if (e.touches.length > 0) {
+                    e.preventDefault();
+                    onInteractionStart(e.touches[0].clientX, e.touches[0].clientY, e.target);
+                }
+            }, { passive: false });
+
+            window.addEventListener('touchend', (e) => {
+                e.preventDefault();
+                onInteractionEnd();
+            }, { passive: false });
+            
+            window.addEventListener('touchmove', (e) => {
+                if (e.touches.length > 0) {
+                    e.preventDefault();
+                    onInteractionMove(e.touches[0].clientX, e.touches[0].clientY);
+                }
+            }, { passive: false });
         }
         
         function recreateSlimeCube(resolution) {
@@ -429,9 +506,9 @@
 
             raycaster = new THREE.Raycaster();
             mouse = new THREE.Vector2();
-            window.addEventListener('mousedown', onMouseDown, false);
-            window.addEventListener('mouseup', onMouseUp, false);
-            window.addEventListener('mousemove', onMouseMove, false);
+            
+            addEventListeners(); // Add both mouse and touch listeners
+
             window.addEventListener('resize', () => {
                 camera.aspect = window.innerWidth / window.innerHeight;
                 camera.updateProjectionMatrix();
