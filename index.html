@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deformable Slime Cube (JS/Three.js)</title>
+    <style>
+        /* Basic styling for the page */
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        /* Make the canvas fill the entire screen */
+        canvas {
+            display: block;
+        }
+        /* UI Controls Container */
+        #controls {
+            position: absolute;
+            top: 10px;
+            width: 100%;
+            text-align: center;
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            background-color: rgba(0,0,0,0.25);
+            padding: 15px;
+            border-radius: 0 0 15px 15px;
+        }
+        /* Slider Controls Styling */
+        .sliderControl {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            width: 320px;
+            justify-content: space-between;
+        }
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 200px;
+            height: 8px;
+            background: #444;
+            border-radius: 5px;
+            outline: none;
+            opacity: 0.7;
+            transition: opacity .2s;
+        }
+        input[type="range"]:hover {
+            opacity: 1;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: #00ff88;
+            cursor: pointer;
+            border-radius: 50%;
+        }
+        input[type="range"]::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            background: #00ff88;
+            cursor: pointer;
+            border-radius: 50%;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <div class="sliderControl">
+            <label for="rigiditySlider">Rigidity:</label>
+            <input type="range" id="rigiditySlider" min="0" max="100" value="50">
+        </div>
+        <div class="sliderControl">
+            <label for="airResistanceSlider">Air Resistance:</label>
+            <input type="range" id="airResistanceSlider" min="0" max="100" value="20">
+        </div>
+        <div class="sliderControl">
+            <label for="gravitySlider">Gravity:</label>
+            <input type="range" id="gravitySlider" min="0" max="100" value="50">
+        </div>
+        <div class="sliderControl">
+            <label for="resolutionSlider">Resolution:</label>
+            <input type="range" id="resolutionSlider" min="3" max="15" value="5">
+        </div>
+    </div>
+
+    <!-- Import the Three.js library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        // --- Deformable Slime Cube using Three.js ---
+        // Author: Gemini
+        // Date: 2024-07-17
+        //
+        // This program simulates a deformable cube using a hybrid mass-spring system.
+        // It uses weak spring forces for jiggle and a constraint solver for stability.
+        // FIX: Optimized with a Spatial Hash Grid for high-performance collision detection.
+
+        // --- Global Three.js Components ---
+        let scene, camera, renderer;
+        let raycaster, mouse;
+        let animationFrameId;
+        let slimeCube;
+        let particleIdCounter = 0;
+        
+        // --- Physics Structures ---
+        class Particle {
+            constructor(position, mass) {
+                this.id = particleIdCounter++;
+                this.position = position;
+                this.old_position = position.clone();
+                this.acceleration = new THREE.Vector3();
+                this.mass = mass;
+                this.is_fixed = false;
+            }
+            applyForce(force) {
+                if (!this.is_fixed) {
+                    this.acceleration.add(force.clone().divideScalar(this.mass));
+                }
+            }
+            update(dt, airResistance) {
+                if (!this.is_fixed) {
+                    const velocity = this.position.clone().sub(this.old_position);
+                    velocity.multiplyScalar(airResistance);
+                    this.old_position.copy(this.position);
+                    this.position.add(velocity).add(this.acceleration.multiplyScalar(dt * dt));
+                    this.acceleration.set(0, 0, 0);
+                }
+            }
+        }
+
+        class Spring {
+            constructor(p1, p2, stiffness, damping) {
+                this.p1 = p1;
+                this.p2 = p2;
+                this.stiffness = stiffness;
+                this.damping = damping;
+                this.rest_length = p1.position.distanceTo(p2.position);
+            }
+            
+            applyForce() {
+                const delta_p = this.p1.position.clone().sub(this.p2.position);
+                const dist = delta_p.length();
+                if (dist > 0) {
+                    const forceMag = -this.stiffness * (dist - this.rest_length);
+                    const force = delta_p.clone().normalize().multiplyScalar(forceMag);
+                    
+                    const delta_v = this.p1.position.clone().sub(this.p1.old_position)
+                                      .sub(this.p2.position.clone().sub(this.p2.old_position));
+                    const dampingForceMag = -this.damping * delta_v.dot(delta_p.normalize());
+                    force.add(delta_p.normalize().multiplyScalar(dampingForceMag));
+
+                    this.p1.applyForce(force);
+                    this.p2.applyForce(force.negate());
+                }
+            }
+        }
+
+        // FIX: Spatial Hash Grid for optimized collision detection
+        class SpatialHashGrid {
+            constructor(cellSize) {
+                this.cellSize = cellSize;
+                this.grid = new Map();
+            }
+            getKey(x, y, z) {
+                return `${Math.floor(x / this.cellSize)},${Math.floor(y / this.cellSize)},${Math.floor(z / this.cellSize)}`;
+            }
+            clear() {
+                this.grid.clear();
+            }
+            insert(particle) {
+                const key = this.getKey(particle.position.x, particle.position.y, particle.position.z);
+                if (!this.grid.has(key)) {
+                    this.grid.set(key, []);
+                }
+                this.grid.get(key).push(particle);
+            }
+            query(particle) {
+                const nearbyParticles = [];
+                const ix = Math.floor(particle.position.x / this.cellSize);
+                const iy = Math.floor(particle.position.y / this.cellSize);
+                const iz = Math.floor(particle.position.z / this.cellSize);
+                for (let i = -1; i <= 1; i++) {
+                    for (let j = -1; j <= 1; j++) {
+                        for (let k = -1; k <= 1; k++) {
+                            const key = `${ix + i},${iy + j},${iz + k}`;
+                            if (this.grid.has(key)) {
+                                nearbyParticles.push(...this.grid.get(key));
+                            }
+                        }
+                    }
+                }
+                return nearbyParticles;
+            }
+        }
+
+        // --- Slime Cube Class ---
+        class SlimeCube {
+            constructor(center, size, resolution) {
+                this.particles = [];
+                this.springs = [];
+                this.resolution = resolution;
+                this.particleRadius = (size / (resolution - 1)) * 0.5;
+                this.constraintIterations = 3;
+                this.airResistance = 0.98;
+                this.gravity = new THREE.Vector3(0, -15, 0);
+                this.collisionGrid = new SpatialHashGrid(this.particleRadius * 2);
+                
+                const step = size / (resolution - 1);
+                for (let i = 0; i < resolution; i++) {
+                    for (let j = 0; j < resolution; j++) {
+                        for (let k = 0; k < resolution; k++) {
+                            const pos = new THREE.Vector3(i * step, j * step, k * step)
+                                .add(center)
+                                .sub(new THREE.Vector3(size / 2, size / 2, size / 2));
+                            this.particles.push(new Particle(pos, 1.0));
+                        }
+                    }
+                }
+
+                const stiffness = 100.0;
+                const damping = 5.0;
+                const addSpring = (p1_idx, p2_idx) => this.springs.push(new Spring(this.particles[p1_idx], this.particles[p2_idx], stiffness, damping));
+                
+                for (let i = 0; i < resolution; i++) {
+                    for (let j = 0; j < resolution; j++) {
+                        for (let k = 0; k < resolution; k++) {
+                            const p_idx = i * resolution * resolution + j * resolution + k;
+                            if (i < resolution - 1) addSpring(p_idx, (i + 1) * resolution * resolution + j * resolution + k);
+                            if (j < resolution - 1) addSpring(p_idx, i * resolution * resolution + (j + 1) * resolution + k);
+                            if (k < resolution - 1) addSpring(p_idx, i * resolution * resolution + j * resolution + (k + 1));
+                            if (i < resolution - 1 && j < resolution - 1) addSpring(p_idx, (i + 1) * resolution * resolution + (j + 1) * resolution + k);
+                            if (i > 0 && j < resolution - 1) addSpring(p_idx, (i - 1) * resolution * resolution + (j + 1) * resolution + k);
+                            if (i < resolution - 1 && k < resolution - 1) addSpring(p_idx, (i + 1) * resolution * resolution + j * resolution + (k + 1));
+                            if (i > 0 && k < resolution - 1) addSpring(p_idx, (i - 1) * resolution * resolution + j * resolution + (k + 1));
+                            if (j < resolution - 1 && k < resolution - 1) addSpring(p_idx, i * resolution * resolution + (j + 1) * resolution + (k + 1));
+                            if (j > 0 && k < resolution - 1) addSpring(p_idx, i * resolution * resolution + (j - 1) * resolution + (k + 1));
+                            if (i < resolution - 2) addSpring(p_idx, (i + 2) * resolution * resolution + j * resolution + k);
+                            if (j < resolution - 2) addSpring(p_idx, i * resolution * resolution + (j + 2) * resolution + k);
+                            if (k < resolution - 2) addSpring(p_idx, i * resolution * resolution + j * resolution + (k + 2));
+                        }
+                    }
+                }
+                
+                this.setupMesh(resolution);
+            }
+            
+            setRigidity(value) {
+                const baseStiffness = 20 + (value / 100) * 400;
+                const scaledStiffness = baseStiffness * (this.resolution / 5);
+                this.constraintIterations = 2 + Math.floor((value / 100) * 6);
+                for(const spring of this.springs) {
+                    spring.stiffness = scaledStiffness;
+                }
+            }
+            setAirResistance(value) {
+                this.airResistance = 1.0 - (value / 100) * 0.05;
+            }
+            setGravity(value) {
+                this.gravity.y = -(value / 100) * 30;
+            }
+
+            setupMesh(resolution) {
+                const geometry = new THREE.BufferGeometry();
+                const indices = [];
+                const get_idx = (i, j, k) => i * resolution * resolution + j * resolution + k;
+                const addFace = (i1, i2, i3, i4) => { indices.push(i1, i2, i3); indices.push(i1, i3, i4); };
+                for (let i = 0; i < resolution - 1; i++) {
+                    for (let j = 0; j < resolution - 1; j++) {
+                        addFace(get_idx(i, resolution - 1, j), get_idx(i + 1, resolution - 1, j), get_idx(i + 1, resolution - 1, j + 1), get_idx(i, resolution - 1, j + 1));
+                        addFace(get_idx(i, 0, j), get_idx(i, 0, j + 1), get_idx(i + 1, 0, j + 1), get_idx(i + 1, 0, j));
+                        addFace(get_idx(i, j, resolution - 1), get_idx(i + 1, j, resolution - 1), get_idx(i + 1, j + 1, resolution - 1), get_idx(i, j + 1, resolution - 1));
+                        addFace(get_idx(i, j, 0), get_idx(i, j + 1, 0), get_idx(i + 1, j + 1, 0), get_idx(i + 1, j, 0));
+                        addFace(get_idx(resolution - 1, i, j), get_idx(resolution - 1, i, j + 1), get_idx(resolution - 1, i + 1, j + 1), get_idx(resolution - 1, i + 1, j));
+                        addFace(get_idx(0, i, j), get_idx(0, i + 1, j), get_idx(0, i + 1, j + 1), get_idx(0, i, j + 1));
+                    }
+                }
+                geometry.setIndex(indices);
+                geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(this.particles.length * 3), 3));
+                const material = new THREE.MeshStandardMaterial({ color: 0x00ff88, metalness: 0.1, roughness: 0.3, transparent: true, opacity: 0.8, side: THREE.DoubleSide });
+                this.mesh = new THREE.Mesh(geometry, material);
+                scene.add(this.mesh);
+            }
+
+            satisfyConstraints() {
+                for (let i = 0; i < this.constraintIterations; i++) {
+                    for (const spring of this.springs) {
+                        const p1 = spring.p1;
+                        const p2 = spring.p2;
+                        const delta = p2.position.clone().sub(p1.position);
+                        const dist = delta.length();
+                        if (dist > 0) {
+                            const max_stretch = spring.rest_length * 1.15;
+                            if (dist > max_stretch) {
+                                const diff = (dist - max_stretch) / dist;
+                                const correction = delta.multiplyScalar(diff * 0.5);
+                                if (!p1.is_fixed) p1.position.add(correction);
+                                if (!p2.is_fixed) p2.position.sub(correction);
+                            }
+                        }
+                    }
+                    this.handleParticleCollisions();
+                }
+            }
+            
+            // FIX: Optimized collision handling
+            handleParticleCollisions() {
+                this.collisionGrid.clear();
+                for (const p of this.particles) {
+                    this.collisionGrid.insert(p);
+                }
+
+                const min_dist = this.particleRadius;
+
+                for (const p1 of this.particles) {
+                    const nearby = this.collisionGrid.query(p1);
+                    for (const p2 of nearby) {
+                        if (p1.id >= p2.id) continue;
+
+                        const delta = p2.position.clone().sub(p1.position);
+                        const dist = delta.length();
+
+                        if (dist < min_dist) {
+                            const diff = (dist - min_dist) / dist;
+                            const correction = delta.multiplyScalar(diff * 0.5);
+                            if (!p1.is_fixed) p1.position.add(correction);
+                            if (!p2.is_fixed) p2.position.sub(correction);
+                        }
+                    }
+                }
+            }
+
+            update(dt) {
+                for (const p of this.particles) p.applyForce(this.gravity);
+                for (const s of this.springs) s.applyForce();
+                for (const p of this.particles) p.update(dt, this.airResistance);
+                this.satisfyConstraints();
+
+                const floorY = -2.0;
+                const restitution = 0.5;
+                for (const p of this.particles) {
+                    if (p.position.y < floorY) {
+                        const vel = p.position.clone().sub(p.old_position);
+                        p.position.y = floorY;
+                        p.old_position.y = p.position.y + vel.y * -restitution;
+                        p.old_position.x = p.position.x - vel.x * 0.98;
+                        p.old_position.z = p.position.z - vel.z * 0.98;
+                    }
+                }
+                
+                let centerZ = 0;
+                for(const p of this.particles) {
+                    centerZ += p.position.z;
+                }
+                centerZ /= this.particles.length;
+                const offsetZ = -centerZ;
+                for(const p of this.particles) {
+                    p.position.z += offsetZ;
+                }
+
+                const positions = this.mesh.geometry.attributes.position.array;
+                for (let i = 0; i < this.particles.length; i++) {
+                    positions[i * 3] = this.particles[i].position.x;
+                    positions[i * 3 + 1] = this.particles[i].position.y;
+                    positions[i * 3 + 2] = this.particles[i].position.z;
+                }
+                this.mesh.geometry.attributes.position.needsUpdate = true;
+                this.mesh.geometry.computeVertexNormals();
+            }
+        }
+        
+        // --- Interaction ---
+        let mouse_dragging = false, dragged_particle = null;
+        let drag_plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+        let drag_offset = new THREE.Vector3();
+
+        function onMouseDown(event) {
+            if (event.target.closest('#controls')) return;
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            let min_dist_sq = Infinity;
+            let closest_particle = null;
+            for(const p of slimeCube.particles) {
+                const dist_sq = raycaster.ray.distanceSqToPoint(p.position);
+                if(dist_sq < min_dist_sq) {
+                    min_dist_sq = dist_sq;
+                    closest_particle = p;
+                }
+            }
+            if(closest_particle && min_dist_sq < 0.5) {
+                dragged_particle = closest_particle;
+                mouse_dragging = true;
+                drag_plane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(drag_plane.normal), dragged_particle.position);
+                const intersection = new THREE.Vector3();
+                raycaster.ray.intersectPlane(drag_plane, intersection);
+                drag_offset.copy(intersection).sub(dragged_particle.position);
+                dragged_particle.is_fixed = true;
+            }
+        }
+        function onMouseUp(event) {
+            if (mouse_dragging && dragged_particle) {
+                dragged_particle.is_fixed = false;
+                dragged_particle.old_position.copy(dragged_particle.position);
+                dragged_particle = null;
+            }
+            mouse_dragging = false;
+        }
+        function onMouseMove(event) {
+            if (mouse_dragging && dragged_particle) {
+                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+                raycaster.setFromCamera(mouse, camera);
+                const intersection = new THREE.Vector3();
+                if (raycaster.ray.intersectPlane(drag_plane, intersection)) {
+                    dragged_particle.position.copy(intersection.sub(drag_offset));
+                }
+            }
+        }
+        
+        function recreateSlimeCube(resolution) {
+            if (slimeCube && slimeCube.mesh) {
+                scene.remove(slimeCube.mesh);
+                slimeCube.mesh.geometry.dispose();
+                slimeCube.mesh.material.dispose();
+            }
+            particleIdCounter = 0; // Reset particle IDs
+            slimeCube = new SlimeCube(new THREE.Vector3(0, 2, 0), 2.0, resolution);
+            slimeCube.setRigidity(document.getElementById('rigiditySlider').value);
+            slimeCube.setAirResistance(document.getElementById('airResistanceSlider').value);
+            slimeCube.setGravity(document.getElementById('gravitySlider').value);
+        }
+
+        // --- Initialization and Animation Loop ---
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 2, 8);
+            renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(5, 5, 5);
+            scene.add(directionalLight);
+            const floorGeometry = new THREE.PlaneGeometry(20, 20);
+            const floorMaterial = new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.8 });
+            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            floor.rotation.x = -Math.PI / 2;
+            floor.position.y = -2.05;
+            scene.add(floor);
+            
+            const rigiditySlider = document.getElementById('rigiditySlider');
+            rigiditySlider.addEventListener('input', (event) => slimeCube.setRigidity(event.target.value));
+            
+            const airResistanceSlider = document.getElementById('airResistanceSlider');
+            airResistanceSlider.addEventListener('input', (event) => slimeCube.setAirResistance(event.target.value));
+            
+            const gravitySlider = document.getElementById('gravitySlider');
+            gravitySlider.addEventListener('input', (event) => slimeCube.setGravity(event.target.value));
+            
+            const resolutionSlider = document.getElementById('resolutionSlider');
+            resolutionSlider.addEventListener('change', (event) => recreateSlimeCube(parseInt(event.target.value)));
+
+            recreateSlimeCube(parseInt(resolutionSlider.value));
+
+            raycaster = new THREE.Raycaster();
+            mouse = new THREE.Vector2();
+            window.addEventListener('mousedown', onMouseDown, false);
+            window.addEventListener('mouseup', onMouseUp, false);
+            window.addEventListener('mousemove', onMouseMove, false);
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            }, false);
+            document.addEventListener('visibilitychange', handleVisibilityChange, false);
+        }
+
+        const clock = new THREE.Clock();
+        const substeps = 5;
+
+        function animate() {
+            animationFrameId = requestAnimationFrame(animate);
+            const deltaTime = clock.getDelta();
+            const dt = Math.min(deltaTime, 0.05) / substeps;
+            for(let i = 0; i < substeps; i++) {
+                if (slimeCube) slimeCube.update(dt);
+            }
+            renderer.render(scene, camera);
+        }
+
+        function handleVisibilityChange() {
+            if (document.hidden) {
+                cancelAnimationFrame(animationFrameId);
+            } else {
+                clock.getDelta(); 
+                animate();
+            }
+        }
+
+        init();
+        animate();
+    </script>
+</body>
+</html>
