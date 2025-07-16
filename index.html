@@ -88,7 +88,7 @@
         </div>
         <div class="sliderControl">
             <label for="resolutionSlider">Resolution:</label>
-            <input type="range" id="resolutionSlider" min="3" max="15" value="5">
+            <input type="range" id="resolutionSlider" min="3" max="10" value="5">
         </div>
     </div>
 
@@ -102,19 +102,16 @@
         //
         // This program simulates a deformable cube using a hybrid mass-spring system.
         // It uses weak spring forces for jiggle and a constraint solver for stability.
-        // FIX: Optimized with a Spatial Hash Grid for high-performance collision detection.
 
         // --- Global Three.js Components ---
         let scene, camera, renderer;
         let raycaster, mouse;
         let animationFrameId;
         let slimeCube;
-        let particleIdCounter = 0;
         
         // --- Physics Structures ---
         class Particle {
             constructor(position, mass) {
-                this.id = particleIdCounter++;
                 this.position = position;
                 this.old_position = position.clone();
                 this.acceleration = new THREE.Vector3();
@@ -164,44 +161,6 @@
             }
         }
 
-        // FIX: Spatial Hash Grid for optimized collision detection
-        class SpatialHashGrid {
-            constructor(cellSize) {
-                this.cellSize = cellSize;
-                this.grid = new Map();
-            }
-            getKey(x, y, z) {
-                return `${Math.floor(x / this.cellSize)},${Math.floor(y / this.cellSize)},${Math.floor(z / this.cellSize)}`;
-            }
-            clear() {
-                this.grid.clear();
-            }
-            insert(particle) {
-                const key = this.getKey(particle.position.x, particle.position.y, particle.position.z);
-                if (!this.grid.has(key)) {
-                    this.grid.set(key, []);
-                }
-                this.grid.get(key).push(particle);
-            }
-            query(particle) {
-                const nearbyParticles = [];
-                const ix = Math.floor(particle.position.x / this.cellSize);
-                const iy = Math.floor(particle.position.y / this.cellSize);
-                const iz = Math.floor(particle.position.z / this.cellSize);
-                for (let i = -1; i <= 1; i++) {
-                    for (let j = -1; j <= 1; j++) {
-                        for (let k = -1; k <= 1; k++) {
-                            const key = `${ix + i},${iy + j},${iz + k}`;
-                            if (this.grid.has(key)) {
-                                nearbyParticles.push(...this.grid.get(key));
-                            }
-                        }
-                    }
-                }
-                return nearbyParticles;
-            }
-        }
-
         // --- Slime Cube Class ---
         class SlimeCube {
             constructor(center, size, resolution) {
@@ -212,7 +171,6 @@
                 this.constraintIterations = 3;
                 this.airResistance = 0.98;
                 this.gravity = new THREE.Vector3(0, -15, 0);
-                this.collisionGrid = new SpatialHashGrid(this.particleRadius * 2);
                 
                 const step = size / (resolution - 1);
                 for (let i = 0; i < resolution; i++) {
@@ -227,22 +185,27 @@
                 }
 
                 const stiffness = 100.0;
-                const damping = 5.0;
+                const damping = 5.0; // Added damping parameter
                 const addSpring = (p1_idx, p2_idx) => this.springs.push(new Spring(this.particles[p1_idx], this.particles[p2_idx], stiffness, damping));
                 
                 for (let i = 0; i < resolution; i++) {
                     for (let j = 0; j < resolution; j++) {
                         for (let k = 0; k < resolution; k++) {
                             const p_idx = i * resolution * resolution + j * resolution + k;
+                            // Structural springs
                             if (i < resolution - 1) addSpring(p_idx, (i + 1) * resolution * resolution + j * resolution + k);
                             if (j < resolution - 1) addSpring(p_idx, i * resolution * resolution + (j + 1) * resolution + k);
                             if (k < resolution - 1) addSpring(p_idx, i * resolution * resolution + j * resolution + (k + 1));
+                            
+                            // BUG FIX: Re-added shear springs for structural integrity
                             if (i < resolution - 1 && j < resolution - 1) addSpring(p_idx, (i + 1) * resolution * resolution + (j + 1) * resolution + k);
                             if (i > 0 && j < resolution - 1) addSpring(p_idx, (i - 1) * resolution * resolution + (j + 1) * resolution + k);
                             if (i < resolution - 1 && k < resolution - 1) addSpring(p_idx, (i + 1) * resolution * resolution + j * resolution + (k + 1));
                             if (i > 0 && k < resolution - 1) addSpring(p_idx, (i - 1) * resolution * resolution + j * resolution + (k + 1));
                             if (j < resolution - 1 && k < resolution - 1) addSpring(p_idx, i * resolution * resolution + (j + 1) * resolution + (k + 1));
                             if (j > 0 && k < resolution - 1) addSpring(p_idx, i * resolution * resolution + (j - 1) * resolution + (k + 1));
+
+                            // Bend springs
                             if (i < resolution - 2) addSpring(p_idx, (i + 2) * resolution * resolution + j * resolution + k);
                             if (j < resolution - 2) addSpring(p_idx, i * resolution * resolution + (j + 2) * resolution + k);
                             if (k < resolution - 2) addSpring(p_idx, i * resolution * resolution + j * resolution + (k + 2));
@@ -310,24 +273,16 @@
                     this.handleParticleCollisions();
                 }
             }
-            
-            // FIX: Optimized collision handling
+
             handleParticleCollisions() {
-                this.collisionGrid.clear();
-                for (const p of this.particles) {
-                    this.collisionGrid.insert(p);
-                }
-
+                const numParticles = this.particles.length;
                 const min_dist = this.particleRadius;
-
-                for (const p1 of this.particles) {
-                    const nearby = this.collisionGrid.query(p1);
-                    for (const p2 of nearby) {
-                        if (p1.id >= p2.id) continue;
-
+                for (let i = 0; i < numParticles; i++) {
+                    for (let j = i + 1; j < numParticles; j++) {
+                        const p1 = this.particles[i];
+                        const p2 = this.particles[j];
                         const delta = p2.position.clone().sub(p1.position);
                         const dist = delta.length();
-
                         if (dist < min_dist) {
                             const diff = (dist - min_dist) / dist;
                             const correction = delta.multiplyScalar(diff * 0.5);
@@ -432,7 +387,6 @@
                 slimeCube.mesh.geometry.dispose();
                 slimeCube.mesh.material.dispose();
             }
-            particleIdCounter = 0; // Reset particle IDs
             slimeCube = new SlimeCube(new THREE.Vector3(0, 2, 0), 2.0, resolution);
             slimeCube.setRigidity(document.getElementById('rigiditySlider').value);
             slimeCube.setAirResistance(document.getElementById('airResistanceSlider').value);
@@ -444,7 +398,7 @@
             scene = new THREE.Scene();
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
             camera.position.set(0, 2, 8);
-            renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+            renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             document.body.appendChild(renderer.domElement);
             const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
